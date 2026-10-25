@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-    // Set Header CORS agar bisa dipanggil dari APK / WebView
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -12,50 +11,38 @@ export default async function handler(req, res) {
     const GITHUB_OWNER = process.env.GITHUB_OWNER || 'barasniper8-commits';
     const GITHUB_REPO = process.env.GITHUB_REPO || 'Vortex-std';
 
-    // 1. MEMBACA DATA (GET)
+    // 1. MEMBACA DATA (GET) - Sembunyikan semua data user dari publik
     if (req.method === 'GET') {
         const type = req.query.type || 'members';
-        const targetFile = type === 'rdp' ? 'rdp-info.json' : 'members-db.json';
-        const fileUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${targetFile}`;
-
-        try {
-            const response = await fetch(fileUrl, {
-                headers: {
-                    'Authorization': `Bearer ${GITHUB_PAT}`,
-                    'Accept': 'application/vnd.github+json'
-                }
-            });
-
-            if (!response.ok) {
-                return res.status(200).json({ data: null, users: [], message: "File belum ada" });
+        
+        // Jika yang diminta adalah data RDP, boleh ditampilkan (karena untuk member yang sedang pakai)
+        if (type === 'rdp') {
+            const fileUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/rdp-info.json`;
+            try {
+                const response = await fetch(fileUrl, {
+                    headers: { 'Authorization': `Bearer ${GITHUB_PAT}`, 'Accept': 'application/vnd.github+json' }
+                });
+                if (!response.ok) return res.status(200).json({ data: null });
+                const data = await response.json();
+                const content = Buffer.from(data.content, 'base64').toString('utf-8');
+                return res.status(200).json({ data: JSON.parse(content) });
+            } catch (error) {
+                return res.status(500).json({ error: error.message });
             }
-
-            const data = await response.json();
-            const content = Buffer.from(data.content, 'base64').toString('utf-8');
-            const parsed = JSON.parse(content);
-
-            if (type === 'rdp') {
-                return res.status(200).json({ data: parsed, sha: data.sha });
-            } else {
-                return res.status(200).json({ users: parsed, sha: data.sha });
-            }
-        } catch (error) {
-            return res.status(500).json({ error: error.message });
         }
+
+        // Untuk endpoint umum member, JANGAN tampilkan data apa pun ke publik
+        return res.status(200).json({ status: "secured", message: "Access restricted" });
     }
 
-    // 2. MEMPROSES AKSI (POST)
+    // 2. MEMPROSES AKSI (POST) - Semua proses dilakukan secara aman di server
     if (req.method === 'POST') {
         const { action, username, password, memberId, amount, rdpCost, tailscaleKey } = req.body;
 
-        // A. TRIGGER GITHUB ACTIONS FOR RDP
         if (action === 'trigger_rdp') {
-            if (!tailscaleKey) {
-                return res.status(400).json({ success: false, message: 'Tailscale Key diperlukan' });
-            }
+            if (!tailscaleKey) return res.status(400).json({ success: false, message: 'Tailscale Key diperlukan' });
 
             const dispatchUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/main.yml/dispatches`;
-
             try {
                 const response = await fetch(dispatchUrl, {
                     method: 'POST',
@@ -64,10 +51,7 @@ export default async function handler(req, res) {
                         'Accept': 'application/vnd.github+json',
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        ref: 'main',
-                        inputs: { tailscale_key: tailscaleKey }
-                    })
+                    body: JSON.stringify({ ref: 'main', inputs: { tailscale_key: tailscaleKey } })
                 });
 
                 if (response.status === 204) {
@@ -81,26 +65,37 @@ export default async function handler(req, res) {
             }
         }
 
-        // B. KELOLA DATABASE MEMBER (REGISTER / DEDUCT / TOPUP)
         const dbUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/members-db.json`;
 
         try {
-            // Ambil data database saat ini
             let currentUsers = [];
             let sha = null;
 
             const getRes = await fetch(dbUrl, {
-                headers: {
-                    'Authorization': `Bearer ${GITHUB_PAT}`,
-                    'Accept': 'application/vnd.github+json'
-                }
+                headers: { 'Authorization': `Bearer ${GITHUB_PAT}`, 'Accept': 'application/vnd.github+json' }
             });
 
             if (getRes.ok) {
                 const fileData = await getRes.json();
                 sha = fileData.sha;
-                const content = Buffer.from(fileData.content, 'base64').toString('utf-8');
-                currentUsers = JSON.parse(content);
+                currentUsers = JSON.parse(Buffer.from(fileData.content, 'base64').toString('utf-8'));
+            }
+
+            // AKSI: LOGIN AMAN DI SERVER
+            if (action === 'login') {
+                const user = currentUsers.find(u => 
+                    (u.username.toLowerCase() === username.toLowerCase() || u.memberId.toLowerCase() === username.toLowerCase()) && 
+                    u.password === password
+                );
+
+                if (!user) {
+                    return res.status(400).json({ success: false, message: 'Username atau password salah' });
+                }
+
+                return res.status(200).json({ 
+                    success: true, 
+                    user: { username: user.username, memberId: user.memberId, balance: user.balance } 
+                });
             }
 
             // AKSI: REGISTER
@@ -148,16 +143,12 @@ export default async function handler(req, res) {
         }
     }
 
-    return res.status(45)
+    return res.status(405).end();
 }
 
-// Helper untuk update file JSON di GitHub
 async function updateGithubDb(url, data, sha, pat, commitMsg) {
     const updatedContent = Buffer.from(JSON.stringify(data, null, 2)).toString('base64');
-    const body = {
-        message: commitMsg,
-        content: updatedContent
-    };
+    const body = { message: commitMsg, content: updatedContent };
     if (sha) body.sha = sha;
 
     await fetch(url, {
