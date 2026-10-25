@@ -34,23 +34,31 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          # 2. Buat Password Otomatis: Alpha-(4 angka acak)
+          # 2. Buat Username Acak: 7 huruf (Depan huruf besar, sisanya huruf kecil)
+          $upper = Get-Random -InputObject ([char[]]'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+          $lower = -join (1..6 | ForEach-Object { Get-Random -InputObject ([char[]]'abcdefghijklmnopqrstuvwxyz') })
+          $username = "$upper$lower"
+
+          # 3. Buat Password Otomatis: Alpha-(4 angka acak)
           $randomDigits = -join (1..4 | ForEach-Object { Get-Random -Maximum 10 })
           $password = "Alpha-$randomDigits"
-          net user runneradmin "$password"
 
-          # 3. Ambil IP Tailscale Runner
+          # 4. Buat User Windows Baru dan tambahkan ke grup Administrator
+          net user $username "$password" /add
+          net localgroup administrators $username /add
+
+          # 5. Ambil IP Tailscale Runner
           $tsIp = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
 
-          # 4. Simpan info ke rdp-info.json
+          # 6. Simpan info ke rdp-info.json
           $info = @{
               ip = "$tsIp"
-              username = "runneradmin"
+              username = "$username"
               password = "$password"
           } | ConvertTo-Json
           Set-Content -Path "rdp-info.json" -Value $info
 
-          # 5. Push file info otomatis ke repository
+          # 7. Push file info otomatis ke repository
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rdp-info.json
@@ -61,7 +69,7 @@ jobs:
           Write-Host "           RDP BERHASIL DIAKTIFKAN!" -ForegroundColor Green
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host " IP Address : $tsIp" -ForegroundColor Yellow
-          Write-Host " Username   : runneradmin" -ForegroundColor Yellow
+          Write-Host " Username   : $username" -ForegroundColor Yellow
           Write-Host " Password   : $password" -ForegroundColor Cyan
           Write-Host "==================================================" -ForegroundColor Green
 
