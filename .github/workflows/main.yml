@@ -10,16 +10,24 @@ on:
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 360 # Batas maksimal 6 jam
+    timeout-minutes: 360
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install & Connect Tailscale
-        uses: tailscale/github-action@v2
-        with:
-          authkey: ${{ github.event.inputs.tailscale_key }}
-          version: latest
+      - name: Install & Connect Tailscale (Windows)
+        shell: powershell
+        run: |
+          Write-Host "Mengunduh dan menginstal Tailscale..." -ForegroundColor Cyan
+          # 1. Download installer Tailscale untuk Windows
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi" -OutFile "tailscale-setup.msi"
+          
+          # 2. Instal secara silent/otomatis
+          Start-Process msiexec.exe -Wait -ArgumentList '/i tailscale-setup.msi /quiet /qn'
+          
+          # 3. Hubungkan ke akun Tailscale menggunakan auth key
+          Write-Host "Menghubungkan ke Tailscale..." -ForegroundColor Cyan
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ github.event.inputs.tailscale_key }}" --unattended
 
       - name: Enable RDP & Generate Random Password
         shell: powershell
@@ -34,7 +42,7 @@ jobs:
           net user runneradmin "$password"
 
           # 3. Ambil IP Tailscale Runner
-          $tsIp = (tailscale ip -4)
+          $tsIp = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
 
           # 4. Cetak Informasi ke Log Actions
           Write-Host "==================================================" -ForegroundColor Green
@@ -48,9 +56,8 @@ jobs:
       - name: Keep RDP Alive (Menjaga Tetap Nyala)
         shell: powershell
         run: |
-          Write-Host "RDP sedang berjalan. Sesi akan tetap aktif sampai waktu habis atau Anda membatalkan (cancel) workflow di GitHub." -ForegroundColor Green
+          Write-Host "RDP sedang berjalan. Sesi akan tetap aktif sampai waktu habis atau Anda membatalkan workflow." -ForegroundColor Green
           
-          # Looping agar action tidak tertutup (menunggu hingga 6 jam / 360 menit)
           $maxMinutes = 360
           for ($i = 1; $i -le $maxMinutes; $i++) {
               Start-Sleep -Seconds 60
