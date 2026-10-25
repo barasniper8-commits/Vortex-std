@@ -1,4 +1,5 @@
 export default async function handler(req, res) {
+    // Set Header CORS agar bisa dipanggil dari APK / WebView
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -8,15 +9,17 @@ export default async function handler(req, res) {
     }
 
     const GITHUB_PAT = process.env.GITHUB_PAT;
-    const GITHUB_OWNER = process.env.GITHUB_OWNER; // barasniper8-commits
-    const GITHUB_REPO = process.env.GITHUB_REPO;   // Vortex-std
-    const DB_FILE = "members-db.json";
+    const GITHUB_OWNER = process.env.GITHUB_OWNER || 'barasniper8-commits';
+    const GITHUB_REPO = process.env.GITHUB_REPO || 'Vortex-std';
 
-    const apiUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${DB_FILE}`;
+    // 1. MEMBACA DATA (GET)
+    if (req.method === 'GET') {
+        const type = req.query.type || 'members';
+        const targetFile = type === 'rdp' ? 'rdp-info.json' : 'members-db.json';
+        const fileUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${targetFile}`;
 
-    try {
-        if (req.method === 'GET') {
-            const response = await fetch(apiUrl, {
+        try {
+            const response = await fetch(fileUrl, {
                 headers: {
                     'Authorization': `Bearer ${GITHUB_PAT}`,
                     'Accept': 'application/vnd.github+json'
@@ -24,114 +27,146 @@ export default async function handler(req, res) {
             });
 
             if (!response.ok) {
-                return res.status(200).json({ users: [], sha: null });
+                return res.status(200).json({ data: null, users: [], message: "File belum ada" });
             }
 
             const data = await response.json();
-            const jsonString = decodeURIComponent(escape(atob(data.content)));
-            return res.status(200).json({ users: JSON.parse(jsonString), sha: data.sha });
+            const content = Buffer.from(data.content, 'base64').toString('utf-8');
+            const parsed = JSON.parse(content);
+
+            if (type === 'rdp') {
+                return res.status(200).json({ data: parsed, sha: data.sha });
+            } else {
+                return res.status(200).json({ users: parsed, sha: data.sha });
+            }
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+    }
+
+    // 2. MEMPROSES AKSI (POST)
+    if (req.method === 'POST') {
+        const { action, username, password, memberId, amount, rdpCost, tailscaleKey } = req.body;
+
+        // A. TRIGGER GITHUB ACTIONS FOR RDP
+        if (action === 'trigger_rdp') {
+            if (!tailscaleKey) {
+                return res.status(400).json({ success: false, message: 'Tailscale Key diperlukan' });
+            }
+
+            const dispatchUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/main.yml/dispatches`;
+
+            try {
+                const response = await fetch(dispatchUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${GITHUB_PAT}`,
+                        'Accept': 'application/vnd.github+json',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        ref: 'main',
+                        inputs: { tailscale_key: tailscaleKey }
+                    })
+                });
+
+                if (response.status === 204) {
+                    return res.status(200).json({ success: true, message: 'Workflow berhasil dipicu' });
+                } else {
+                    const errData = await response.json();
+                    return res.status(400).json({ success: false, message: errData.message || 'Gagal memicu workflow' });
+                }
+            } catch (error) {
+                return res.status(500).json({ success: false, message: error.message });
+            }
         }
 
-        if (req.method === 'POST') {
-            const { action, username, password, memberId, amount, rdpCost } = req.body;
+        // B. KELOLA DATABASE MEMBER (REGISTER / DEDUCT / TOPUP)
+        const dbUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/members-db.json`;
 
-            const currentRes = await fetch(apiUrl, {
+        try {
+            // Ambil data database saat ini
+            let currentUsers = [];
+            let sha = null;
+
+            const getRes = await fetch(dbUrl, {
                 headers: {
                     'Authorization': `Bearer ${GITHUB_PAT}`,
                     'Accept': 'application/vnd.github+json'
                 }
             });
 
-            let users = [];
-            let sha = null;
-
-            if (currentRes.ok) {
-                const currentData = await currentRes.json();
-                sha = currentData.sha;
-                users = JSON.parse(decodeURIComponent(escape(atob(currentData.content))));
+            if (getRes.ok) {
+                const fileData = await getRes.json();
+                sha = fileData.sha;
+                const content = Buffer.from(fileData.content, 'base64').toString('utf-8');
+                currentUsers = JSON.parse(content);
             }
 
+            // AKSI: REGISTER
             if (action === 'register') {
-                if (users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
+                if (currentUsers.some(u => u.username.toLowerCase() === username.toLowerCase())) {
                     return res.status(400).json({ success: false, message: 'Username sudah digunakan' });
                 }
 
-                const newMember = {
-                    username,
-                    password,
-                    memberId: 'VORTEX-' + Math.floor(10000 + Math.random() * 90000),
-                    balance: 0,
-                    role: 'user'
-                };
+                const newId = 'VORTEX-' + Math.floor(10000 + Math.random() * 90000);
+                const newUser = { username, password, memberId: newId, balance: 0 };
+                currentUsers.push(newUser);
 
-                users.push(newMember);
-
-                const saveRes = await saveToGitHub(apiUrl, GITHUB_PAT, users, sha, `Register user: ${username}`);
-                if (saveRes) {
-                    return res.status(200).json({ success: true, user: newMember });
-                } else {
-                    return res.status(500).json({ success: false, message: 'Gagal menyimpan ke database' });
-                }
+                await updateGithubDb(dbUrl, currentUsers, sha, GITHUB_PAT, `Register: ${username}`);
+                return res.status(200).json({ success: true, user: newUser });
             }
 
-            if (action === 'topup') {
-                const userIndex = users.findIndex(u => u.memberId.toLowerCase() === memberId.toLowerCase());
-                if (userIndex === -1) {
-                    return res.status(404).json({ success: false, message: 'ID Member tidak ditemukan' });
-                }
-
-                users[userIndex].balance += parseInt(amount);
-
-                const saveRes = await saveToGitHub(apiUrl, GITHUB_PAT, users, sha, `Top-up ${amount} to ${memberId}`);
-                if (saveRes) {
-                    return res.status(200).json({ success: true, users });
-                } else {
-                    return res.status(500).json({ success: false, message: 'Gagal memperbarui saldo' });
-                }
-            }
-
+            // AKSI: DEDUCT (POTONG SALDO)
             if (action === 'deduct') {
-                const userIndex = users.findIndex(u => u.username === username);
-                if (userIndex === -1 || users[userIndex].balance < rdpCost) {
+                const idx = currentUsers.findIndex(u => u.username === username);
+                if (idx === -1) return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
+
+                if (currentUsers[idx].balance < rdpCost) {
                     return res.status(400).json({ success: false, message: 'Saldo tidak mencukupi' });
                 }
 
-                users[userIndex].balance -= rdpCost;
-
-                const saveRes = await saveToGitHub(apiUrl, GITHUB_PAT, users, sha, `Deduct balance for RDP: ${username}`);
-                if (saveRes) {
-                    return res.status(200).json({ success: true, balance: users[userIndex].balance });
-                } else {
-                    return res.status(500).json({ success: false, message: 'Gagal memotong saldo' });
-                }
+                currentUsers[idx].balance -= rdpCost;
+                await updateGithubDb(dbUrl, currentUsers, sha, GITHUB_PAT, `Deduct: ${username}`);
+                return res.status(200).json({ success: true, balance: currentUsers[idx].balance });
             }
+
+            // AKSI: TOPUP (ADMIN)
+            if (action === 'topup') {
+                const idx = currentUsers.findIndex(u => u.memberId.toLowerCase() === memberId.toLowerCase());
+                if (idx === -1) return res.status(404).json({ success: false, message: 'ID Member tidak ditemukan' });
+
+                currentUsers[idx].balance += amount;
+                await updateGithubDb(dbUrl, currentUsers, sha, GITHUB_PAT, `Topup: ${memberId}`);
+                return res.status(200).json({ success: true, balance: currentUsers[idx].balance });
+            }
+
+            return res.status(400).json({ success: false, message: 'Action tidak valid' });
+
+        } catch (error) {
+            return res.status(500).json({ success: false, message: error.message });
         }
-
-        return res.status(405).json({ message: 'Method not allowed' });
-
-    } catch (error) {
-        return res.status(500).json({ success: false, error: error.message });
     }
+
+    return res.status(45)
 }
 
-async function saveToGitHub(apiUrl, pat, users, sha, message) {
-    const contentEncoded = btoa(unescape(encodeURIComponent(JSON.stringify(users, null, 2))));
-    const bodyData = {
-        message: message,
-        content: contentEncoded,
-        branch: "main"
+// Helper untuk update file JSON di GitHub
+async function updateGithubDb(url, data, sha, pat, commitMsg) {
+    const updatedContent = Buffer.from(JSON.stringify(data, null, 2)).toString('base64');
+    const body = {
+        message: commitMsg,
+        content: updatedContent
     };
-    if (sha) bodyData.sha = sha;
+    if (sha) body.sha = sha;
 
-    const response = await fetch(apiUrl, {
+    await fetch(url, {
         method: 'PUT',
         headers: {
             'Authorization': `Bearer ${pat}`,
             'Accept': 'application/vnd.github+json',
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify(bodyData)
+        body: JSON.stringify(body)
     });
-
-    return response.ok;
 }
