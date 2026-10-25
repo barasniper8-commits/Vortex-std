@@ -1,129 +1,45 @@
-name: win 11 + tailscale + Download.bat script 
+name: Start RDP Tailscale
 
 on:
   workflow_dispatch:
+    inputs:
+      tailscale_key:
+        description: 'Tailscale Auth Key'
+        required: true
 
 jobs:
-  secure-rdp:
-    runs-on: windows-2022
-    timeout-minutes: 350
-
+  rdp:
+    runs-on: windows-latest
     steps:
-      - name: Configure Core RDP Settings
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install & Connect Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ github.event.inputs.tailscale_key }}
+          version: latest
+
+      - name: Enable RDP & Generate Random Password
+        shell: powershell
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
+          # 1. Aktifkan Remote Desktop (RDP)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-      - name: Create RDP User with Fixed Password
-        run: |
-          $password = "MR.English2008"
-          $exists = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
-          if (-not $exists) { net user RDP $password /add /expires:never } else { net user RDP$password }
-          net localgroup Administrators RDP /add
-          net localgroup "Remote Desktop Users" RDP /add
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          # 2. Buat Password Acak Otomatis untuk runneradmin (12 Karakter)
+          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object {[char]$_})
+          net user runneradmin "$password"
 
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          $wc = New-Object System.Net.WebClient
-          $wc.DownloadFile($tsUrl,$installerPath)
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          # 3. Ambil IP Tailscale Runner
+          $tsIp = (tailscale ip -4)
 
-      - name: Establish Tailscale Connection
-        env:
-          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$env:TS_AUTHKEY" --hostname="gh-runner-$env:GITHUB_RUN_ID"
-          $tsIP =$null
-          for ($i = 0; $i -lt 15; $i++) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              if ($tsIP) { break }
-              Start-Sleep -Seconds 4
-          }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned"; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: 1. Buat Folder Tema C:\CustomTheme
-        run: |
-          $themeDir = "C:\CustomTheme"
-          if (-not (Test-Path $themeDir)) {
-              New-Item -ItemType Directory -Path $themeDir -Force | Out-Null
-          }
-
-      - name: 2. Unduh Gambar Wallpaper
-        run: |
-          $url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1600"
-          $out = "C:\CustomTheme\wallpaper.jpg"
-          $wc = New-Object System.Net.WebClient
-          $wc.DownloadFile($url,$out)
-
-      - name: 3. Unduh Gambar Lock Screen
-        run: |
-          $url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1600"
-          $out = "C:\CustomTheme\lock_screen.jpg"
-          $wc = New-Object System.Net.WebClient
-          $wc.DownloadFile($url,$out)
-
-      - name: 4. Terapkan Registry Wallpaper & Lock Screen
-        run: |
-          $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
-          if (-not (Test-Path $policyPath)) {
-              New-Item -Path $policyPath -Force | Out-Null
-          }
-          Set-ItemProperty -Path $policyPath -Name "LockScreenImage" -Value "C:\CustomTheme\lock_screen.jpg" -Force
-          Set-ItemProperty -Path $policyPath -Name "DesktopImagePath" -Value "C:\CustomTheme\wallpaper.jpg" -Force
-          Set-ItemProperty -Path $policyPath -Name "DesktopImageStatus" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path $policyPath -Name "WallpaperStyle" -Value 2 -Force
-          Write-Host "✅ Wallpaper dan Lock Screen berhasil diatur dengan status aktif!"
-
-      - name: Maintain Connection + Watch RDP User
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: MR.English2008"
-          Write-Host "==================`n"
-
-          $rdpProfile = "C:\Users\RDP"
-          $startupPath = "$rdpProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
-          $downloadUrl = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
-          $downloadPath = "$startupPath\Downloads.bat"
-
-          while ($true) {
-              if (Test-Path $rdpProfile) {
-                  try {
-                      New-Item -ItemType Directory -Path $startupPath -Force \vert{} Out-Null$avatarUrl = "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500"
-                      $avatarPath = "C:\CustomTheme\user_avatar.jpg"
-                      $wc = New-Object System.Net.WebClient
-                      $wc.DownloadFile($avatarUrl,$avatarPath)
-                      Copy-Item -Path $avatarPath -Destination "$rdpProfile\Desktop\Foto_Profil.jpg" -Force
-
-                      Invoke-WebRequest -Uri $downloadUrl -OutFile$downloadPath -UseBasicParsing
-                      Write-Host "✅ Downloads.bat copied to $startupPath"
-
-                      cmd /c $downloadPath
-                      Write-Host "✅ Downloads.bat executed successfully"
-                      break
-                  }
-                  catch {
-                      Write-Host "❌ Error: $_"
-                      break
-                  }
-              }
-              else {
-                  Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
-                  Start-Sleep -Seconds 30
-              }
-          }
-
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
+          # 4. Cetak Informasi Koneksi ke Log Actions
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "           RDP BERHASIL DIAKTIFKAN!" -ForegroundColor Green
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host " IP Address : $tsIp" -ForegroundColor Yellow
+          Write-Host " Username   : runneradmin" -ForegroundColor Yellow
+          Write-Host " Password   : $password" -ForegroundColor Cyan
+          Write-Host "==================================================" -ForegroundColor Green
