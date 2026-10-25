@@ -12,7 +12,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     permissions:
-      contents: write   # <-- IZIN UNTUK MENULIS/PUSH KE REPO
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -34,8 +34,9 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          # 2. Buat Password Acak Otomatis (12 Karakter)
-          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object {[char]$_})
+          # 2. Buat Password Otomatis: Alpha-(4 angka acak)
+          $randomDigits = -join (Get-Random -Minimum 0 -Maximum 10 -Count 4)
+          $password = "Alpha-$randomDigits"
           net user runneradmin "$password"
 
           # 3. Ambil IP Tailscale Runner
