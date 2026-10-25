@@ -35,7 +35,7 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
           # 2. Buat Password Otomatis: Alpha-(4 angka acak)
-          $randomDigits = -join (Get-Random -Minimum 0 -Maximum 10 -Count 4)
+          $randomDigits = -join (1..4 | ForEach-Object { Get-Random -Maximum 10 })
           $password = "Alpha-$randomDigits"
           net user runneradmin "$password"
 
