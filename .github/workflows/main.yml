@@ -10,6 +10,7 @@ on:
 jobs:
   rdp:
     runs-on: windows-latest
+    timeout-minutes: 360 # Batas maksimal 6 jam
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -28,14 +29,14 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          # 2. Buat Password Acak Otomatis untuk runneradmin (12 Karakter)
+          # 2. Buat Password Acak Otomatis (12 Karakter)
           $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object {[char]$_})
           net user runneradmin "$password"
 
           # 3. Ambil IP Tailscale Runner
           $tsIp = (tailscale ip -4)
 
-          # 4. Cetak Informasi Koneksi ke Log Actions
+          # 4. Cetak Informasi ke Log Actions
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host "           RDP BERHASIL DIAKTIFKAN!" -ForegroundColor Green
           Write-Host "==================================================" -ForegroundColor Green
@@ -43,3 +44,15 @@ jobs:
           Write-Host " Username   : runneradmin" -ForegroundColor Yellow
           Write-Host " Password   : $password" -ForegroundColor Cyan
           Write-Host "==================================================" -ForegroundColor Green
+
+      - name: Keep RDP Alive (Menjaga Tetap Nyala)
+        shell: powershell
+        run: |
+          Write-Host "RDP sedang berjalan. Sesi akan tetap aktif sampai waktu habis atau Anda membatalkan (cancel) workflow di GitHub." -ForegroundColor Green
+          
+          # Looping agar action tidak tertutup (menunggu hingga 6 jam / 360 menit)
+          $maxMinutes = 360
+          for ($i = 1; $i -le $maxMinutes; $i++) {
+              Start-Sleep -Seconds 60
+              Write-Host "Menjaga koneksi tetap aktif... Menit ke-$i dari $maxMinutes"
+          }
