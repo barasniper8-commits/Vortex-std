@@ -18,14 +18,9 @@ jobs:
       - name: Install & Connect Tailscale (Windows)
         shell: powershell
         run: |
-          Write-Host "Mengunduh dan menginstal Tailscale..." -ForegroundColor Cyan
-          # 1. Download installer Tailscale untuk Windows
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi" -OutFile "tailscale-setup.msi"
+          Write-Host "Menginstal Tailscale menggunakan winget..." -ForegroundColor Cyan
+          winget install --id Tailscale.Tailscale -e --accept-source-agreements --accept-package-agreements
           
-          # 2. Instal secara silent/otomatis
-          Start-Process msiexec.exe -Wait -ArgumentList '/i tailscale-setup.msi /quiet /qn'
-          
-          # 3. Hubungkan ke akun Tailscale menggunakan auth key
           Write-Host "Menghubungkan ke Tailscale..." -ForegroundColor Cyan
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ github.event.inputs.tailscale_key }}" --unattended
 
