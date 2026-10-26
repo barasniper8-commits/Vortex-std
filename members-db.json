@@ -5,5 +5,11 @@
     "memberId": "VORTEX-21749",
     "balance": 13300,
     "role": "user"
+  },
+  {
+    "username": "Arianto12",
+    "password": "Zero1212",
+    "memberId": "VORTEX-15465",
+    "balance": 0
   }
 ]
