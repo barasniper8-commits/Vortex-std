@@ -51,16 +51,13 @@ export default async function handler(req, res) {
       crypto.timingSafeEqual(x, y);
   }
 
-  // Fungsi untuk mengenkripsi password dengan salt & scrypt
   function hashPassword(password) {
     const salt = crypto.randomBytes(16).toString("hex");
     const hash = crypto.scryptSync(password, salt, 64).toString("hex");
     return `${salt}:${hash}`;
   }
 
-  // Fungsi untuk memverifikasi password
   function verifyPassword(password, storedPassword) {
-    // Dukungan kompatibilitas mundur untuk password lama (plaintext)
     if (!storedPassword.includes(":")) {
       return password === storedPassword;
     }
@@ -142,10 +139,24 @@ export default async function handler(req, res) {
       "base64"
     ).toString("utf8");
 
-    const parsed = JSON.parse(content);
+    let parsed = JSON.parse(content);
 
     if (!Array.isArray(parsed)) {
       throw new Error("Format members-db.json tidak valid.");
+    }
+
+    // Otomatis ubah password lama (plaintext) menjadi hashed secara massal
+    let needsUpdate = false;
+    parsed = parsed.map(u => {
+      if (u.password && !u.password.includes(":")) {
+        u.password = hashPassword(u.password);
+        needsUpdate = true;
+      }
+      return u;
+    });
+
+    if (needsUpdate) {
+      await saveDatabase(parsed, file.sha, "Otomatis migrasi password member ke hash aman");
     }
 
     return { users: parsed, sha: file.sha };
@@ -185,26 +196,14 @@ export default async function handler(req, res) {
     }
     bodyData = bodyData || {};
 
-    // Admin login
-    if (req.method === "POST" &&
-        bodyData.action === "admin_login") {
+    if (req.method === "POST" && bodyData.action === "admin_login") {
       if (!ADMIN_USER || !ADMIN_PASS) {
-        return res.status(500).json({
-          success: false,
-          message: "ADMIN_USERNAME atau ADMIN_PASSWORD belum diatur."
-        });
+        return res.status(500).json({ success: false, message: "Kredensial admin belum diatur." });
       }
 
       const { username, password } = bodyData;
-
-      if (
-        !safeEqual(username, ADMIN_USER) ||
-        !safeEqual(password, ADMIN_PASS)
-      ) {
-        return res.status(401).json({
-          success: false,
-          message: "Username atau password admin salah."
-        });
+      if (!safeEqual(username, ADMIN_USER) || !safeEqual(password, ADMIN_PASS)) {
+        return res.status(401).json({ success: false, message: "Username atau password admin salah." });
       }
 
       return res.status(200).json({
@@ -214,157 +213,70 @@ export default async function handler(req, res) {
       });
     }
 
-    // GET request (Read members / rdp info)
     if (req.method === "GET") {
       const type = req.query?.type || "members";
 
       if (type === "rdp") {
-        const url =
-          `https://api.github.com/repos/${OWNER}/${REPO}/contents/rdp-info.json`;
-
+        const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/rdp-info.json`;
         const response = await fetch(url, { headers });
-
-        if (!response.ok) {
-          return res.status(502).json({
-            success: false,
-            message: "Gagal membaca informasi RDP."
-          });
-        }
+        if (!response.ok) return res.status(502).json({ success: false, message: "Gagal membaca RDP info." });
 
         const file = await response.json();
-        const info = JSON.parse(
-          Buffer.from(
-            file.content.replace(/\s/g, ""),
-            "base64"
-          ).toString("utf8")
-        );
-
+        const info = JSON.parse(Buffer.from(file.content.replace(/\s/g, ""), "base64").toString("utf8"));
         return res.status(200).json({ data: info });
       }
 
       if (!verifyAdmin(req)) {
-        return res.status(401).json({
-          success: false,
-          message: "Akses admin diperlukan."
-        });
+        return res.status(401).json({ success: false, message: "Akses admin diperlukan." });
       }
 
       const { users } = await readDatabase();
-
       const safeUsers = users.map((u) => ({
         username: u.username,
         memberId: u.memberId,
         balance: Number(u.balance) || 0
       }));
 
-      return res.status(200).json({
-        success: true,
-        users: safeUsers
-      });
+      return res.status(200).json({ success: true, users: safeUsers });
     }
 
     if (req.method !== "POST") {
-      return res.status(405).json({
-        success: false,
-        message: "Method tidak didukung."
-      });
+      return res.status(405).json({ success: false, message: "Method tidak didukung." });
     }
 
-    const {
-      action,
-      username,
-      password,
-      memberId,
-      amount,
-      rdpCost,
-      tailscaleKey
-    } = bodyData;
+    const { action, username, password, memberId, amount, rdpCost, tailscaleKey } = bodyData;
 
-    // Top-up member
     if (action === "topup") {
-      if (!verifyAdmin(req)) {
-        return res.status(401).json({
-          success: false,
-          message: "Login admin diperlukan untuk top-up."
-        });
-      }
-
+      if (!verifyAdmin(req)) return res.status(401).json({ success: false, message: "Login admin diperlukan." });
       const value = Number(amount);
 
-      if (
-        typeof memberId !== "string" ||
-        !memberId.trim() ||
-        !Number.isFinite(value) ||
-        value <= 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Member ID atau jumlah top-up tidak valid."
-        });
+      if (typeof memberId !== "string" || !memberId.trim() || !Number.isFinite(value) || value <= 0) {
+        return res.status(400).json({ success: false, message: "Data top-up tidak valid." });
       }
 
       const { users, sha } = await readDatabase();
-      const user = users.find(
-        (u) => String(u.memberId).toLowerCase() ===
-          memberId.trim().toLowerCase()
-      );
-
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: "Member tidak ditemukan."
-        });
-      }
+      const user = users.find((u) => String(u.memberId).toLowerCase() === memberId.trim().toLowerCase());
+      if (!user) return res.status(404).json({ success: false, message: "Member tidak ditemukan." });
 
       user.balance = (Number(user.balance) || 0) + value;
+      await saveDatabase(users, sha, `Admin top-up saldo member ${user.memberId}`);
 
-      await saveDatabase(
-        users,
-        sha,
-        `Admin top-up saldo member ${user.memberId}`
-      );
-
-      return res.status(200).json({
-        success: true,
-        message: "Top-up berhasil.",
-        balance: user.balance
-      });
+      return res.status(200).json({ success: true, message: "Top-up berhasil.", balance: user.balance });
     }
 
-    // Login member
     if (action === "login") {
-      if (
-        typeof username !== "string" ||
-        typeof password !== "string"
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Username dan password diperlukan."
-        });
+      if (typeof username !== "string" || typeof password !== "string") {
+        return res.status(400).json({ success: false, message: "Username dan password diperlukan." });
       }
 
-      const { users, sha } = await readDatabase();
+      const { users } = await readDatabase();
       const user = users.find((u) =>
         String(u.username).toLowerCase() === username.toLowerCase() ||
         String(u.memberId).toLowerCase() === username.toLowerCase()
       );
 
       if (!user || !verifyPassword(password, user.password)) {
-        return res.status(401).json({
-          success: false,
-          message: "Username atau password member salah."
-        });
-      }
-
-      // Jika akun lama masih menggunakan password plaintext, otomatis upgrade ke hashed
-      let dbUpdated = false;
-      if (!user.password.includes(":")) {
-        user.password = hashPassword(password);
-        dbUpdated = true;
-      }
-
-      if (dbUpdated) {
-        await saveDatabase(users, sha, `Upgrade password hash untuk ${user.memberId}`);
+        return res.status(401).json({ success: false, message: "Username atau password salah." });
       }
 
       return res.status(200).json({
@@ -377,121 +289,55 @@ export default async function handler(req, res) {
       });
     }
 
-    // Registrasi member (Password di-hash secara otomatis)
     if (action === "register") {
-      if (
-        typeof username !== "string" ||
-        typeof password !== "string" ||
-        username.trim().length < 3 ||
-        password.length < 6
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Username minimal 3 karakter dan password minimal 6 karakter."
-        });
+      if (typeof username !== "string" || typeof password !== "string" || username.trim().length < 3 || password.length < 6) {
+        return res.status(400).json({ success: false, message: "Minimal username 3 dan password 6 karakter." });
       }
 
       const { users, sha } = await readDatabase();
-
-      if (users.some(
-        (u) => String(u.username).toLowerCase() ===
-          username.trim().toLowerCase()
-      )) {
-        return res.status(409).json({
-          success: false,
-          message: "Username sudah digunakan."
-        });
+      if (users.some((u) => String(u.username).toLowerCase() === username.trim().toLowerCase())) {
+        return res.status(409).json({ success: false, message: "Username sudah digunakan." });
       }
 
-      const newId = "VORTEX-" +
-        crypto.randomInt(10000, 100000);
-
+      const newId = "VORTEX-" + crypto.randomInt(10000, 100000);
       const newUser = {
         username: username.trim(),
-        password: hashPassword(password), // Terenkripsi aman!
+        password: hashPassword(password),
         memberId: newId,
         balance: 0
       };
 
       users.push(newUser);
-
-      await saveDatabase(
-        users,
-        sha,
-        `Register member ${newId}`
-      );
+      await saveDatabase(users, sha, `Register member ${newId}`);
 
       return res.status(201).json({
         success: true,
-        user: {
-          username: newUser.username,
-          memberId: newUser.memberId,
-          balance: newUser.balance
-        }
+        user: { username: newUser.username, memberId: newUser.memberId, balance: newUser.balance }
       });
     }
 
-    // Potong saldo
     if (action === "deduct") {
       const cost = Number(rdpCost);
-
-      if (
-        typeof username !== "string" ||
-        !Number.isFinite(cost) ||
-        cost <= 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Username atau biaya tidak valid."
-        });
+      if (typeof username !== "string" || !Number.isFinite(cost) || cost <= 0) {
+        return res.status(400).json({ success: false, message: "Data tidak valid." });
       }
 
       const { users, sha } = await readDatabase();
-      const user = users.find(
-        (u) => String(u.username).toLowerCase() ===
-          username.toLowerCase()
-      );
-
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: "Member tidak ditemukan."
-        });
-      }
+      const user = users.find((u) => String(u.username).toLowerCase() === username.toLowerCase());
+      if (!user) return res.status(404).json({ success: false, message: "Member tidak ditemukan." });
 
       const balance = Number(user.balance) || 0;
-
-      if (balance < cost) {
-        return res.status(400).json({
-          success: false,
-          message: "Saldo tidak mencukupi."
-        });
-      }
+      if (balance < cost) return res.status(400).json({ success: false, message: "Saldo tidak mencukupi." });
 
       user.balance = balance - cost;
+      await saveDatabase(users, sha, `Potong saldo member ${user.memberId}`);
 
-      await saveDatabase(
-        users,
-        sha,
-        `Potong saldo member ${user.memberId}`
-      );
-
-      return res.status(200).json({
-        success: true,
-        balance: user.balance
-      });
+      return res.status(200).json({ success: true, balance: user.balance });
     }
 
-    return res.status(400).json({
-      success: false,
-      message: `Action tidak dikenal: [${action}]`
-    });
+    return res.status(400).json({ success: false, message: `Action tidak dikenal: [${action}]` });
   } catch (error) {
     console.error("Members API error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Terjadi kesalahan pada server. Periksa Vercel Logs."
-    });
+    return res.status(500).json({ success: false, message: "Terjadi kesalahan pada server." });
   }
 }
