@@ -34,5 +34,11 @@
     "password": "akis1234",
     "memberId": "VORTEX-82666",
     "balance": 500
+  },
+  {
+    "username": "Zero",
+    "password": "Arianto1",
+    "memberId": "VORTEX-66199",
+    "balance": 0
   }
 ]
