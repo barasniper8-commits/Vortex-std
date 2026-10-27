@@ -154,9 +154,19 @@ export default async function handler(req, res) {
   }
 
   try {
+    let bodyData = req.body;
+    if (typeof bodyData === "string") {
+      try {
+        bodyData = JSON.parse(bodyData);
+      } catch {
+        bodyData = {};
+      }
+    }
+    bodyData = bodyData || {};
+
     // Admin login: terpisah dari login member.
     if (req.method === "POST" &&
-        req.body?.action === "admin_login") {
+        bodyData.action === "admin_login") {
       if (!ADMIN_USER || !ADMIN_PASS) {
         return res.status(500).json({
           success: false,
@@ -164,7 +174,7 @@ export default async function handler(req, res) {
         });
       }
 
-      const { username, password } = req.body;
+      const { username, password } = bodyData;
 
       if (
         !safeEqual(username, ADMIN_USER) ||
@@ -220,7 +230,6 @@ export default async function handler(req, res) {
 
       const { users } = await readDatabase();
 
-      // Jangan pernah mengirim password member ke browser admin.
       const safeUsers = users.map((u) => ({
         username: u.username,
         memberId: u.memberId,
@@ -248,7 +257,7 @@ export default async function handler(req, res) {
       amount,
       rdpCost,
       tailscaleKey
-    } = req.body || {};
+    } = bodyData;
 
     // Top-up hanya dapat dilakukan admin yang sudah login.
     if (action === "topup") {
@@ -343,7 +352,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Jalankan workflow RDP; dipertahankan agar alur lama tetap bekerja.
+    // Jalankan workflow RDP.
     if (action === "trigger_rdp") {
       if (
         typeof tailscaleKey !== "string" ||
@@ -471,7 +480,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Potong saldo sesuai alur lama.
+    // Potong saldo.
     if (action === "deduct") {
       const cost = Number(rdpCost);
 
@@ -524,7 +533,7 @@ export default async function handler(req, res) {
 
     return res.status(400).json({
       success: false,
-      message: "Action tidak dikenal."
+      message: `Action tidak dikenal: [${action}]`
     });
   } catch (error) {
     console.error("Members API error:", error.message);
