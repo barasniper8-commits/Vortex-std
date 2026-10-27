@@ -1,6 +1,7 @@
-
 {
   "name": "vortex-backend",
   "version": "1.0.0",
-  "dependencies": {}
+  "dependencies": {
+    "redis": "^4.6.13"
+  }
 }
