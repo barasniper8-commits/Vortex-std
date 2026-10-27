@@ -1,4 +1,3 @@
-
 import crypto from "node:crypto";
 
 export default async function handler(req, res) {
@@ -299,6 +298,48 @@ export default async function handler(req, res) {
         success: true,
         message: "Top-up berhasil.",
         balance: user.balance
+      });
+    }
+
+    // Hapus member oleh admin.
+    if (action === "delete") {
+      if (!verifyAdmin(req)) {
+        return res.status(401).json({
+          success: false,
+          message: "Login admin diperlukan untuk menghapus member."
+        });
+      }
+
+      if (typeof memberId !== "string" || !memberId.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Member ID tidak valid."
+        });
+      }
+
+      const { users, sha } = await readDatabase();
+      const index = users.findIndex(
+        (u) => String(u.memberId).toLowerCase() === memberId.trim().toLowerCase()
+      );
+
+      if (index === -1) {
+        return res.status(404).json({
+          success: false,
+          message: "Member tidak ditemukan."
+        });
+      }
+
+      const deletedUser = users.splice(index, 1)[0];
+
+      await saveDatabase(
+        users,
+        sha,
+        `Admin menghapus member ${deletedUser.memberId} (${deletedUser.username})`
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "Member berhasil dihapus."
       });
     }
 
