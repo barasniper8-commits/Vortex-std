@@ -51,6 +51,27 @@ export default async function handler(req, res) {
       crypto.timingSafeEqual(x, y);
   }
 
+  // Fungsi untuk mengenkripsi password dengan salt & scrypt
+  function hashPassword(password) {
+    const salt = crypto.randomBytes(16).toString("hex");
+    const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+    return `${salt}:${hash}`;
+  }
+
+  // Fungsi untuk memverifikasi password
+  function verifyPassword(password, storedPassword) {
+    // Dukungan kompatibilitas mundur untuk password lama (plaintext)
+    if (!storedPassword.includes(":")) {
+      return password === storedPassword;
+    }
+
+    const [salt, key] = storedPassword.split(":");
+    if (!salt || !key) return false;
+
+    const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+    return safeEqual(hash, key);
+  }
+
   function sessionSecret() {
     return crypto
       .createHash("sha256")
@@ -164,7 +185,7 @@ export default async function handler(req, res) {
     }
     bodyData = bodyData || {};
 
-    // Admin login: terpisah dari login member.
+    // Admin login
     if (req.method === "POST" &&
         bodyData.action === "admin_login") {
       if (!ADMIN_USER || !ADMIN_PASS) {
@@ -193,7 +214,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Daftar member hanya boleh dibaca admin.
+    // GET request (Read members / rdp info)
     if (req.method === "GET") {
       const type = req.query?.type || "members";
 
@@ -259,7 +280,7 @@ export default async function handler(req, res) {
       tailscaleKey
     } = bodyData;
 
-    // Top-up hanya dapat dilakukan admin yang sudah login.
+    // Top-up member
     if (action === "topup") {
       if (!verifyAdmin(req)) {
         return res.status(401).json({
@@ -310,86 +331,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Hapus member oleh admin.
-    if (action === "delete") {
-      if (!verifyAdmin(req)) {
-        return res.status(401).json({
-          success: false,
-          message: "Login admin diperlukan untuk menghapus member."
-        });
-      }
-
-      if (typeof memberId !== "string" || !memberId.trim()) {
-        return res.status(400).json({
-          success: false,
-          message: "Member ID tidak valid."
-        });
-      }
-
-      const { users, sha } = await readDatabase();
-      const index = users.findIndex(
-        (u) => String(u.memberId).toLowerCase() === memberId.trim().toLowerCase()
-      );
-
-      if (index === -1) {
-        return res.status(404).json({
-          success: false,
-          message: "Member tidak ditemukan."
-        });
-      }
-
-      const deletedUser = users.splice(index, 1)[0];
-
-      await saveDatabase(
-        users,
-        sha,
-        `Admin menghapus member ${deletedUser.memberId} (${deletedUser.username})`
-      );
-
-      return res.status(200).json({
-        success: true,
-        message: "Member berhasil dihapus."
-      });
-    }
-
-    // Jalankan workflow RDP.
-    if (action === "trigger_rdp") {
-      if (
-        typeof tailscaleKey !== "string" ||
-        !tailscaleKey.trim()
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Tailscale Key diperlukan."
-        });
-      }
-
-      const dispatchUrl =
-        `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/main.yml/dispatches`;
-
-      const response = await fetch(dispatchUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          ref: "main",
-          inputs: { tailscale_key: tailscaleKey.trim() }
-        })
-      });
-
-      if (response.status !== 204) {
-        return res.status(502).json({
-          success: false,
-          message: "Gagal menjalankan workflow RDP."
-        });
-      }
-
-      return res.status(200).json({
-        success: true,
-        message: "Workflow RDP berhasil dipicu."
-      });
-    }
-
-    // Login member.
+    // Login member
     if (action === "login") {
       if (
         typeof username !== "string" ||
@@ -401,19 +343,28 @@ export default async function handler(req, res) {
         });
       }
 
-      const { users } = await readDatabase();
+      const { users, sha } = await readDatabase();
       const user = users.find((u) =>
-        (
-          String(u.username).toLowerCase() === username.toLowerCase() ||
-          String(u.memberId).toLowerCase() === username.toLowerCase()
-        ) && u.password === password
+        String(u.username).toLowerCase() === username.toLowerCase() ||
+        String(u.memberId).toLowerCase() === username.toLowerCase()
       );
 
-      if (!user) {
+      if (!user || !verifyPassword(password, user.password)) {
         return res.status(401).json({
           success: false,
           message: "Username atau password member salah."
         });
+      }
+
+      // Jika akun lama masih menggunakan password plaintext, otomatis upgrade ke hashed
+      let dbUpdated = false;
+      if (!user.password.includes(":")) {
+        user.password = hashPassword(password);
+        dbUpdated = true;
+      }
+
+      if (dbUpdated) {
+        await saveDatabase(users, sha, `Upgrade password hash untuk ${user.memberId}`);
       }
 
       return res.status(200).json({
@@ -426,7 +377,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Registrasi member.
+    // Registrasi member (Password di-hash secara otomatis)
     if (action === "register") {
       if (
         typeof username !== "string" ||
@@ -457,7 +408,7 @@ export default async function handler(req, res) {
 
       const newUser = {
         username: username.trim(),
-        password,
+        password: hashPassword(password), // Terenkripsi aman!
         memberId: newId,
         balance: 0
       };
@@ -480,7 +431,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Potong saldo.
+    // Potong saldo
     if (action === "deduct") {
       const cost = Number(rdpCost);
 
