@@ -43,30 +43,31 @@ export default async function handler(req, res) {
     if (typeof a !== "string" || typeof b !== "string") {
       return false;
     }
-
     const x = Buffer.from(a);
     const y = Buffer.from(b);
-
-    return x.length === y.length &&
-      crypto.timingSafeEqual(x, y);
+    return x.length === y.length && crypto.timingSafeEqual(x, y);
   }
 
+  // Fungsi untuk mengenkripsi password menjadi hash aman
   function hashPassword(password) {
     const salt = crypto.randomBytes(16).toString("hex");
     const hash = crypto.scryptSync(password, salt, 64).toString("hex");
     return `${salt}:${hash}`;
   }
 
-  function verifyPassword(password, storedPassword) {
-    if (!storedPassword.includes(":")) {
-      return password === storedPassword;
+  // Fungsi untuk memverifikasi password (mendukung format hash baru & teks biasa lama)
+  function verifyPassword(password, stored) {
+    if (!stored) return false;
+    if (!stored.includes(":")) {
+      return password === stored; // Kompatibilitas data lama
     }
-
-    const [salt, key] = storedPassword.split(":");
-    if (!salt || !key) return false;
-
-    const hash = crypto.scryptSync(password, salt, 64).toString("hex");
-    return safeEqual(hash, key);
+    try {
+      const [salt, key] = stored.split(":");
+      const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+      return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(key, "hex"));
+    } catch {
+      return false;
+    }
   }
 
   function sessionSecret() {
@@ -139,24 +140,10 @@ export default async function handler(req, res) {
       "base64"
     ).toString("utf8");
 
-    let parsed = JSON.parse(content);
+    const parsed = JSON.parse(content);
 
     if (!Array.isArray(parsed)) {
       throw new Error("Format members-db.json tidak valid.");
-    }
-
-    // Otomatis ubah password lama (plaintext) menjadi hashed secara massal
-    let needsUpdate = false;
-    parsed = parsed.map(u => {
-      if (u.password && !u.password.includes(":")) {
-        u.password = hashPassword(u.password);
-        needsUpdate = true;
-      }
-      return u;
-    });
-
-    if (needsUpdate) {
-      await saveDatabase(parsed, file.sha, "Otomatis migrasi password member ke hash aman");
     }
 
     return { users: parsed, sha: file.sha };
@@ -196,14 +183,26 @@ export default async function handler(req, res) {
     }
     bodyData = bodyData || {};
 
-    if (req.method === "POST" && bodyData.action === "admin_login") {
+    // Admin login
+    if (req.method === "POST" &&
+        bodyData.action === "admin_login") {
       if (!ADMIN_USER || !ADMIN_PASS) {
-        return res.status(500).json({ success: false, message: "Kredensial admin belum diatur." });
+        return res.status(500).json({
+          success: false,
+          message: "ADMIN_USERNAME atau ADMIN_PASSWORD belum diatur."
+        });
       }
 
       const { username, password } = bodyData;
-      if (!safeEqual(username, ADMIN_USER) || !safeEqual(password, ADMIN_PASS)) {
-        return res.status(401).json({ success: false, message: "Username atau password admin salah." });
+
+      if (
+        !safeEqual(username, ADMIN_USER) ||
+        !safeEqual(password, ADMIN_PASS)
+      ) {
+        return res.status(401).json({
+          success: false,
+          message: "Username atau password admin salah."
+        });
       }
 
       return res.status(200).json({
@@ -214,69 +213,154 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "GET") {
-      const type = req.query?.type || "members";
-
-      if (type === "rdp") {
-        const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/rdp-info.json`;
-        const response = await fetch(url, { headers });
-        if (!response.ok) return res.status(502).json({ success: false, message: "Gagal membaca RDP info." });
-
-        const file = await response.json();
-        const info = JSON.parse(Buffer.from(file.content.replace(/\s/g, ""), "base64").toString("utf8"));
-        return res.status(200).json({ data: info });
-      }
-
       if (!verifyAdmin(req)) {
-        return res.status(401).json({ success: false, message: "Akses admin diperlukan." });
+        return res.status(401).json({
+          success: false,
+          message: "Akses admin diperlukan."
+        });
       }
 
       const { users } = await readDatabase();
+
       const safeUsers = users.map((u) => ({
         username: u.username,
         memberId: u.memberId,
         balance: Number(u.balance) || 0
       }));
 
-      return res.status(200).json({ success: true, users: safeUsers });
+      return res.status(200).json({
+        success: true,
+        users: safeUsers
+      });
     }
 
     if (req.method !== "POST") {
-      return res.status(405).json({ success: false, message: "Method tidak didukung." });
+      return res.status(405).json({
+        success: false,
+        message: "Method tidak didukung."
+      });
     }
 
-    const { action, username, password, memberId, amount, rdpCost, tailscaleKey } = bodyData;
+    const {
+      action,
+      username,
+      password,
+      memberId,
+      amount,
+      rdpCost,
+      tailscaleKey
+    } = bodyData;
 
+    // Top-up member
     if (action === "topup") {
-      if (!verifyAdmin(req)) return res.status(401).json({ success: false, message: "Login admin diperlukan." });
+      if (!verifyAdmin(req)) {
+        return res.status(401).json({
+          success: false,
+          message: "Login admin diperlukan untuk top-up."
+        });
+      }
+
       const value = Number(amount);
 
-      if (typeof memberId !== "string" || !memberId.trim() || !Number.isFinite(value) || value <= 0) {
-        return res.status(400).json({ success: false, message: "Data top-up tidak valid." });
+      if (
+        typeof memberId !== "string" ||
+        !memberId.trim() ||
+        !Number.isFinite(value) ||
+        value <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Member ID atau jumlah top-up tidak valid."
+        });
       }
 
       const { users, sha } = await readDatabase();
-      const user = users.find((u) => String(u.memberId).toLowerCase() === memberId.trim().toLowerCase());
-      if (!user) return res.status(404).json({ success: false, message: "Member tidak ditemukan." });
+      const user = users.find(
+        (u) => String(u.memberId).toLowerCase() ===
+          memberId.trim().toLowerCase()
+      );
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Member tidak ditemukan."
+        });
+      }
 
       user.balance = (Number(user.balance) || 0) + value;
-      await saveDatabase(users, sha, `Admin top-up saldo member ${user.memberId}`);
 
-      return res.status(200).json({ success: true, message: "Top-up berhasil.", balance: user.balance });
+      await saveDatabase(
+        users,
+        sha,
+        `Admin top-up saldo member ${user.memberId}`
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "Top-up berhasil.",
+        balance: user.balance
+      });
     }
 
+    // Trigger RDP workflow
+    if (action === "trigger_rdp") {
+      if (typeof tailscaleKey !== "string" || !tailscaleKey.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Tailscale Key diperlukan."
+        });
+      }
+
+      const dispatchUrl =
+        `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/main.yml/dispatches`;
+
+      const response = await fetch(dispatchUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          ref: "main",
+          inputs: { tailscale_key: tailscaleKey.trim() }
+        })
+      });
+
+      if (response.status !== 204) {
+        return res.status(502).json({
+          success: false,
+          message: "Gagal menjalankan workflow RDP."
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Workflow RDP berhasil dipicu."
+      });
+    }
+
+    // Login member (diverifikasi dengan aman)
     if (action === "login") {
-      if (typeof username !== "string" || typeof password !== "string") {
-        return res.status(400).json({ success: false, message: "Username dan password diperlukan." });
+      if (
+        typeof username !== "string" ||
+        typeof password !== "string"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Username dan password diperlukan."
+        });
       }
 
       const { users } = await readDatabase();
       const user = users.find((u) =>
-        String(u.username).toLowerCase() === username.toLowerCase() ||
-        String(u.memberId).toLowerCase() === username.toLowerCase()
+        (
+          String(u.username).toLowerCase() === username.toLowerCase() ||
+          String(u.memberId).toLowerCase() === username.toLowerCase()
+        ) && verifyPassword(password, u.password)
       );
 
-      if (!user || !verifyPassword(password, user.password)) {
-        return res.status(401).json({ success: false, message: "Username atau password salah." });
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: "Username atau password member salah."
+        });
       }
 
       return res.status(200).json({
@@ -289,55 +373,119 @@ export default async function handler(req, res) {
       });
     }
 
+    // Registrasi member (password langsung di-hash otomatis)
     if (action === "register") {
-      if (typeof username !== "string" || typeof password !== "string" || username.trim().length < 3 || password.length < 6) {
-        return res.status(400).json({ success: false, message: "Minimal username 3 dan password 6 karakter." });
+      if (
+        typeof username !== "string" ||
+        typeof password !== "string" ||
+        username.trim().length < 3 ||
+        password.length < 6
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Username minimal 3 karakter dan password minimal 6 karakter."
+        });
       }
 
       const { users, sha } = await readDatabase();
-      if (users.some((u) => String(u.username).toLowerCase() === username.trim().toLowerCase())) {
-        return res.status(409).json({ success: false, message: "Username sudah digunakan." });
+
+      if (users.some(
+        (u) => String(u.username).toLowerCase() ===
+          username.trim().toLowerCase()
+      )) {
+        return res.status(409).json({
+          success: false,
+          message: "Username sudah digunakan."
+        });
       }
 
       const newId = "VORTEX-" + crypto.randomInt(10000, 100000);
+      const hashedPassword = hashPassword(password);
+
       const newUser = {
         username: username.trim(),
-        password: hashPassword(password),
+        password: hashedPassword, // Disimpan dalam bentuk hash aman, bukan teks biasa!
         memberId: newId,
         balance: 0
       };
 
       users.push(newUser);
-      await saveDatabase(users, sha, `Register member ${newId}`);
+
+      await saveDatabase(
+        users,
+        sha,
+        `Register member ${newId}`
+      );
 
       return res.status(201).json({
         success: true,
-        user: { username: newUser.username, memberId: newUser.memberId, balance: newUser.balance }
+        user: {
+          username: newUser.username,
+          memberId: newUser.memberId,
+          balance: newUser.balance
+        }
       });
     }
 
+    // Potong saldo
     if (action === "deduct") {
       const cost = Number(rdpCost);
-      if (typeof username !== "string" || !Number.isFinite(cost) || cost <= 0) {
-        return res.status(400).json({ success: false, message: "Data tidak valid." });
+
+      if (
+        typeof username !== "string" ||
+        !Number.isFinite(cost) ||
+        cost <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Username atau biaya tidak valid."
+        });
       }
 
       const { users, sha } = await readDatabase();
-      const user = users.find((u) => String(u.username).toLowerCase() === username.toLowerCase());
-      if (!user) return res.status(404).json({ success: false, message: "Member tidak ditemukan." });
+      const user = users.find(
+        (u) => String(u.username).toLowerCase() ===
+          username.toLowerCase()
+      );
+
+      if (!user) {
+        return res.status(404).json({
+          message: "Member tidak ditemukan."
+        });
+      }
 
       const balance = Number(user.balance) || 0;
-      if (balance < cost) return res.status(400).json({ success: false, message: "Saldo tidak mencukupi." });
+
+      if (balance < cost) {
+        return res.status(400).json({
+          success: false,
+          message: "Saldo tidak mencukupi."
+        });
+      }
 
       user.balance = balance - cost;
-      await saveDatabase(users, sha, `Potong saldo member ${user.memberId}`);
 
-      return res.status(200).json({ success: true, balance: user.balance });
+      await saveDatabase(
+        users,
+        sha,
+        `Potong saldo member ${user.memberId}`
+      );
+
+      return res.status(200).json({
+        success: true,
+        balance: user.balance
+      });
     }
 
-    return res.status(400).json({ success: false, message: `Action tidak dikenal: [${action}]` });
+    return res.status(400).json({
+      success: false,
+      message: `Action tidak dikenal: [${action}]`
+    });
   } catch (error) {
     console.error("Members API error:", error.message);
-    return res.status(500).json({ success: false, message: "Terjadi kesalahan pada server." });
+    return res.status(500).json({
+      success: false,
+      message: "Terjadi kesalahan pada server. Periksa Vercel Logs."
+    });
   }
 }
