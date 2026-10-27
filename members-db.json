@@ -46,6 +46,11 @@
     "password": "123456",
     "memberId": "VORTEX-63101",
     "balance": 1000
+  },
+  {
+    "username": "Salad",
+    "password": "SandiKuat123",
+    "memberId": "VORTEX-31203",
+    "balance": 0
   }
-  
 ]
