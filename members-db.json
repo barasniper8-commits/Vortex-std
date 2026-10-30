@@ -130,5 +130,11 @@
     "password": "123456",
     "memberId": "VORTEX-20331",
     "balance": 0
+  },
+  {
+    "username": "Rdr",
+    "password": "123456",
+    "memberId": "VORTEX-29792",
+    "balance": 0
   }
 ]
