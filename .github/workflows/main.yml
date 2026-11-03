@@ -73,7 +73,7 @@ jobs:
           Write-Host " Password   : $password" -ForegroundColor Cyan
           Write-Host "==================================================" -ForegroundColor Green
 
-      - name: Install MetaTrader 5
+      - name: Install MetaTrader 5 & Create Desktop Shortcut
         shell: powershell
         run: |
           Write-Host "Mengunduh installer MetaTrader 5..." -ForegroundColor Cyan
@@ -83,7 +83,31 @@ jobs:
           Write-Host "Menginstal MetaTrader 5 secara otomatis..." -ForegroundColor Cyan
           Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-" -Wait
           
-          Write-Host "MetaTrader 5 berhasil diinstal!" -ForegroundColor Green
+          Write-Host "Membuat shortcut MetaTrader 5 di Public Desktop..." -ForegroundColor Cyan
+          $desktopPath = "C:\Users\Public\Desktop"
+          $mt5Path = "C:\Program Files\MetaTrader 5\terminal64.exe"
+          
+          Start-Sleep -Seconds 5
+          
+          if (Test-Path $mt5Path) {
+              $WscriptShell = New-Object -ComObject WScript.Shell
+              $Shortcut = $WscriptShell.CreateShortcut("$desktopPath\MetaTrader 5.lnk")
+              $Shortcut.TargetPath = $mt5Path
+              $Shortcut.Save()
+              Write-Host "Shortcut MetaTrader 5 berhasil dibuat di Public Desktop!" -ForegroundColor Green
+          } else {
+              Write-Host "Mencari jalur alternatif terminal64.exe..." -ForegroundColor Yellow
+              $foundPath = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($foundPath) {
+                  $WscriptShell = New-Object -ComObject WScript.Shell
+                  $Shortcut = $WscriptShell.CreateShortcut("$desktopPath\MetaTrader 5.lnk")
+                  $Shortcut.TargetPath = $foundPath.FullName
+                  $Shortcut.Save()
+                  Write-Host "Shortcut MetaTrader 5 berhasil dibuat dari jalur alternatif!" -ForegroundColor Green
+              } else {
+                  Write-Host "Gagal menemukan terminal64.exe secara otomatis." -ForegroundColor Red
+              }
+          }
 
       - name: Keep RDP Alive (Menjaga Tetap Nyala)
         shell: powershell
