@@ -73,6 +73,18 @@ jobs:
           Write-Host " Password   : $password" -ForegroundColor Cyan
           Write-Host "==================================================" -ForegroundColor Green
 
+      - name: Install MetaTrader 5
+        shell: powershell
+        run: |
+          Write-Host "Mengunduh installer MetaTrader 5..." -ForegroundColor Cyan
+          $installerPath = "$env:TEMP\mt5setup.exe"
+          Invoke-WebRequest -Uri "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile $installerPath
+          
+          Write-Host "Menginstal MetaTrader 5 secara otomatis..." -ForegroundColor Cyan
+          Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-" -Wait
+          
+          Write-Host "MetaTrader 5 berhasil diinstal!" -ForegroundColor Green
+
       - name: Keep RDP Alive (Menjaga Tetap Nyala)
         shell: powershell
         run: |
