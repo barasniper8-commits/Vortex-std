@@ -123,9 +123,45 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
+      // Ambil kredensial RDP terbaru dari rdp-info.json di GitHub
+      if (req.query?.type === "rdp") {
+        if (!PAT) {
+          return res.status(500).json({ success: false, message: "GITHUB_PAT belum dikonfigurasi di server." });
+        }
+
+        const fileUrl = `https://api.github.com/repos/${OWNER}/${REPO}/contents/rdp-info.json?ref=main`;
+        const ghRes = await fetch(fileUrl, {
+          headers: {
+            Authorization: `Bearer ${PAT}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+          },
+          cache: "no-store"
+        });
+
+        if (!ghRes.ok) {
+          return res.status(404).json({ success: false, message: "rdp-info.json belum tersedia di repository." });
+        }
+
+        const ghFile = await ghRes.json();
+        const decoded = Buffer.from(ghFile.content || "", "base64").toString("utf8");
+        const rdpData = JSON.parse(decoded);
+
+        return res.status(200).json({
+          success: true,
+          data: {
+            ip: String(rdpData.ip || "").trim(),
+            username: String(rdpData.username || "Administrator").trim(),
+            password: String(rdpData.password || "").trim()
+          }
+        });
+      }
+
+      // Ambil daftar member untuk Vortex Admin PRO
       if (!verifyAdminToken(req)) {
         return res.status(401).json({ success: false, message: "Token admin tidak valid atau kedaluwarsa." });
       }
+
       const users = await getUsers();
       const safeUsers = users.map((u) => ({
         username: u.username,
