@@ -122,7 +122,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // GET: Khusus Admin (mengambil daftar member)
     if (req.method === "GET") {
       if (!verifyAdminToken(req)) {
         return res.status(401).json({ success: false, message: "Token admin tidak valid atau kedaluwarsa." });
@@ -150,7 +149,7 @@ export default async function handler(req, res) {
     }
     bodyData = bodyData || {};
 
-    const { action, username, password, memberId, amount, rdpCost, tailscaleKey } = bodyData;
+    const { action, username, password, memberId, newPassword, amount, rdpCost, tailscaleKey } = bodyData;
 
     // 0. ADMIN LOGIN
     if (action === "admin_login") {
@@ -242,7 +241,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, balance: user.balance });
     }
 
-    // 4. DEDUCT (Bisa dari Admin via memberId + amount, atau Member via username + rdpCost)
+    // 4. DEDUCT (Admin via memberId + amount, atau Member via username + rdpCost)
     if (action === "deduct") {
       const hasAdminHeader = Boolean(req.headers?.authorization || req.headers?.Authorization);
 
@@ -291,7 +290,37 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, balance: user.balance });
     }
 
-    // 5. DELETE MEMBER (Khusus Admin)
+    // 5. RESET PASSWORD MEMBER (Khusus Admin)
+    if (action === "reset_password") {
+      if (!verifyAdminToken(req)) {
+        return res.status(401).json({ success: false, message: "Akses admin tidak terotorisasi." });
+      }
+
+      const targetId = typeof memberId === "string" ? memberId.trim().toUpperCase() : "";
+      const rawNewPass = typeof newPassword === "string" ? newPassword : "";
+
+      if (!targetId) {
+        return res.status(400).json({ success: false, message: "Member ID diperlukan." });
+      }
+      if (rawNewPass.length < 4) {
+        return res.status(400).json({ success: false, message: "Password baru minimal 4 karakter." });
+      }
+
+      const users = await getUsers();
+      const user = users.find((u) => String(u.memberId).toUpperCase() === targetId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: "Member tidak ditemukan." });
+      }
+
+      user.password = hashPassword(rawNewPass);
+      await saveUsers(users);
+      return res.status(200).json({
+        success: true,
+        message: `Password untuk ${user.username} (${user.memberId}) berhasil direset.`
+      });
+    }
+
+    // 6. DELETE MEMBER (Khusus Admin)
     if (action === "delete") {
       if (!verifyAdminToken(req)) {
         return res.status(401).json({ success: false, message: "Akses admin tidak terotorisasi." });
@@ -312,7 +341,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, message: "Member berhasil dihapus." });
     }
 
-    // 6. TRIGGER RDP
+    // 7. TRIGGER RDP
     if (action === "trigger_rdp") {
       if (!tailscaleKey || typeof tailscaleKey !== "string" || !tailscaleKey.trim()) {
         return res.status(400).json({ success: false, message: "Tailscale Key diperlukan." });
