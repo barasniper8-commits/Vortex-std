@@ -19,6 +19,59 @@ async function getRedisClient() {
   return client;
 }
 
+const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || "").trim();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const ADMIN_SECRET = process.env.ADMIN_SECRET || process.env.JWT_SECRET || "";
+
+function createAdminToken(username) {
+  const secret = ADMIN_SECRET || "vortex-default-secret-change-env";
+  const payload = Buffer.from(
+    JSON.stringify({
+      role: "admin",
+      user: username,
+      exp: Date.now() + 1000 * 60 * 60 * 12
+    })
+  ).toString("base64url");
+
+  const sig = crypto
+    .createHmac("sha256", secret)
+    .update(payload)
+    .digest("base64url");
+
+  return `${payload}.${sig}`;
+}
+
+function verifyAdminToken(req) {
+  const secret = ADMIN_SECRET || "vortex-default-secret-change-env";
+  const authHeader = req.headers?.authorization || req.headers?.Authorization || "";
+  if (!authHeader.startsWith("Bearer ")) return false;
+
+  const token = authHeader.slice(7).trim();
+  const parts = token.split(".");
+  if (parts.length !== 2) return false;
+
+  const [payload, sig] = parts;
+  if (!payload || !sig) return false;
+
+  const expectedSig = crypto
+    .createHmac("sha256", secret)
+    .update(payload)
+    .digest("base64url");
+
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return parsed?.role === "admin" && typeof parsed?.exp === "number" && parsed.exp > Date.now();
+  } catch {
+    return false;
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -69,6 +122,24 @@ export default async function handler(req, res) {
   }
 
   try {
+    // GET: Khusus Admin (mengambil daftar member)
+    if (req.method === "GET") {
+      if (!verifyAdminToken(req)) {
+        return res.status(401).json({ success: false, message: "Token admin tidak valid atau kedaluwarsa." });
+      }
+      const users = await getUsers();
+      const safeUsers = users.map((u) => ({
+        username: u.username,
+        memberId: u.memberId,
+        balance: Number(u.balance) || 0
+      }));
+      return res.status(200).json({ success: true, users: safeUsers });
+    }
+
+    if (req.method !== "POST") {
+      return res.status(405).json({ success: false, message: "Method tidak didukung." });
+    }
+
     let bodyData = req.body;
     if (typeof bodyData === "string") {
       try {
@@ -79,11 +150,30 @@ export default async function handler(req, res) {
     }
     bodyData = bodyData || {};
 
-    if (req.method !== "POST") {
-      return res.status(405).json({ success: false, message: "Method tidak didukung." });
-    }
+    const { action, username, password, memberId, amount, rdpCost, tailscaleKey } = bodyData;
 
-    const { action, username, password, rdpCost, tailscaleKey } = bodyData;
+    // 0. ADMIN LOGIN
+    if (action === "admin_login") {
+      const cleanUser = typeof username === "string" ? username.trim() : "";
+      const rawPass = typeof password === "string" ? password : "";
+
+      if (!ADMIN_USERNAME || !ADMIN_PASSWORD) {
+        return res.status(500).json({
+          success: false,
+          message: "ADMIN_USERNAME atau ADMIN_PASSWORD belum dikonfigurasi di Vercel ENV."
+        });
+      }
+
+      if (cleanUser !== ADMIN_USERNAME || rawPass !== ADMIN_PASSWORD) {
+        return res.status(401).json({
+          success: false,
+          message: "Username atau password admin salah."
+        });
+      }
+
+      const token = createAdminToken(cleanUser);
+      return res.status(200).json({ success: true, token });
+    }
 
     // 1. REGISTER
     if (action === "register") {
@@ -109,7 +199,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2. LOGIN
+    // 2. LOGIN MEMBER
     if (action === "login") {
       const cleanLogin = typeof username === "string" ? username.trim().toLowerCase() : "";
       if (!cleanLogin || typeof password !== "string") {
@@ -129,8 +219,60 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3. DEDUCT (Potong Saldo RDP)
+    // 3. TOPUP SALDO (Khusus Admin)
+    if (action === "topup") {
+      if (!verifyAdminToken(req)) {
+        return res.status(401).json({ success: false, message: "Akses admin tidak terotorisasi." });
+      }
+
+      const targetId = typeof memberId === "string" ? memberId.trim().toUpperCase() : "";
+      const addAmount = Number(amount);
+      if (!targetId || !Number.isFinite(addAmount) || addAmount <= 0) {
+        return res.status(400).json({ success: false, message: "Member ID dan nominal topup tidak valid." });
+      }
+
+      const users = await getUsers();
+      const user = users.find((u) => String(u.memberId).toUpperCase() === targetId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: "Member ID tidak ditemukan." });
+      }
+
+      user.balance = (Number(user.balance) || 0) + addAmount;
+      await saveUsers(users);
+      return res.status(200).json({ success: true, balance: user.balance });
+    }
+
+    // 4. DEDUCT (Bisa dari Admin via memberId + amount, atau Member via username + rdpCost)
     if (action === "deduct") {
+      const hasAdminHeader = Boolean(req.headers?.authorization || req.headers?.Authorization);
+
+      if (hasAdminHeader && memberId) {
+        if (!verifyAdminToken(req)) {
+          return res.status(401).json({ success: false, message: "Akses admin tidak terotorisasi." });
+        }
+
+        const targetId = String(memberId).trim().toUpperCase();
+        const cutAmount = Number(amount);
+        if (!targetId || !Number.isFinite(cutAmount) || cutAmount <= 0) {
+          return res.status(400).json({ success: false, message: "Member ID dan nominal potong saldo tidak valid." });
+        }
+
+        const users = await getUsers();
+        const user = users.find((u) => String(u.memberId).toUpperCase() === targetId);
+        if (!user) {
+          return res.status(404).json({ success: false, message: "Member ID tidak ditemukan." });
+        }
+
+        const currentBalance = Number(user.balance) || 0;
+        if (currentBalance < cutAmount) {
+          return res.status(400).json({ success: false, message: "Saldo member tidak mencukupi untuk dipotong." });
+        }
+
+        user.balance = currentBalance - cutAmount;
+        await saveUsers(users);
+        return res.status(200).json({ success: true, balance: user.balance });
+      }
+
       const cleanUsername = typeof username === "string" ? username.trim().toLowerCase() : "";
       const cost = Number(rdpCost) || 100;
       const users = await getUsers();
@@ -149,7 +291,28 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, balance: user.balance });
     }
 
-    // 4. TRIGGER RDP
+    // 5. DELETE MEMBER (Khusus Admin)
+    if (action === "delete") {
+      if (!verifyAdminToken(req)) {
+        return res.status(401).json({ success: false, message: "Akses admin tidak terotorisasi." });
+      }
+
+      const targetId = typeof memberId === "string" ? memberId.trim().toUpperCase() : "";
+      if (!targetId) {
+        return res.status(400).json({ success: false, message: "Member ID diperlukan." });
+      }
+
+      const users = await getUsers();
+      const filtered = users.filter((u) => String(u.memberId).toUpperCase() !== targetId);
+      if (filtered.length === users.length) {
+        return res.status(404).json({ success: false, message: "Member tidak ditemukan." });
+      }
+
+      await saveUsers(filtered);
+      return res.status(200).json({ success: true, message: "Member berhasil dihapus." });
+    }
+
+    // 6. TRIGGER RDP
     if (action === "trigger_rdp") {
       if (!tailscaleKey || typeof tailscaleKey !== "string" || !tailscaleKey.trim()) {
         return res.status(400).json({ success: false, message: "Tailscale Key diperlukan." });
