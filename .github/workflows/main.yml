@@ -1,4 +1,4 @@
-Name: Start RDP Tailscale
+name: Start RDP Tailscale
 
 on:
   workflow_dispatch:
